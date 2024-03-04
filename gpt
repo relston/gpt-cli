@@ -1,0 +1,109 @@
+#!/bin/bash
+
+##
+# gpt.sh - run prompts against OpenAI api and/or Credal API
+#
+# Either set a OPENAI_API_KEY or a CREDAL_API_KEY
+#
+# Usage:
+# - with a file parameter
+# => ./gpt.sh path/to/file.txt # Reads content of file as the prompt and appends response to the file
+# - with stdin string
+# => echo "Whats the capital of California?" | ./gpt.sh
+#
+# You can specify a different model using the '--model' param
+# => ./gpt.sh --model gpt-4 path/to/file.txt
+#
+# Endpoints
+OPEN_AI_ENDPOINT='https://api.openai.com/v1'
+CREDAL_OPEN_AI_ENDPOINT='https://app.credal.ai/api/openai'
+
+# Detect which API to use
+if [[ -n ${CREDAL_API_KEY+set} ]]; then
+    CURRENT_API_KEY=$CREDAL_API_KEY
+    CURRENT_ENDPOINT=$CREDAL_OPEN_AI_ENDPOINT
+elif [[ -n ${OPENAI_API_KEY+set} ]]; then
+    CURRENT_API_KEY=$OPENAI_API_KEY
+    CURRENT_ENDPOINT=$OPEN_AI_ENDPOINT
+else
+    echo "Error: Must has define either CREDAL_API_KEY or OPENAI_API_KEY"
+    exit 1
+fi
+
+# Default model
+model='gpt-4-turbo-preview'
+
+function list_models {
+    curl -s "$CURRENT_ENDPOINT/models" -H "Authorization: Bearer $CURRENT_API_KEY" \
+        | jq -r '.data[] | .id' | sort
+}
+
+# Explain this bash code
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --list) list_models; exit 0;;
+        # Set --model param
+        --model) model="$2"; shift ;;
+        *) break ;;
+    esac
+    shift
+done
+
+# Create the .gpt-cli directory if it doesn't exist
+mkdir -p ~/.gpt-cli
+
+# Create a payload compatable with Credal or OpenAI
+function generate_open_ai_paylaod {
+    jq -n \
+        --arg model "$model" \
+        --arg content "$@" \
+        '{
+            model: $model,
+            messages: [
+                {
+                    role: "system",
+                    content: "You are a helpful assistant."
+                },
+                {
+                    role: "user",
+                    content: $content
+                }
+            ]
+        }'
+}
+
+# Retrive output for a given prompt
+function make_request {
+    curl -s $1 \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $2" \
+        -d "$3"
+}
+
+# Adding these logs for debugging
+function log {
+    datetime=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "$datetime: $@" >> ~/.gpt-cli/gpt.log
+}
+
+# Detect which API to use from environment Vars
+function process_prompt {
+    payload=$(generate_open_ai_paylaod "$@")
+    response_payload=$(make_request "$CURRENT_ENDPOINT/chat/completions" $CURRENT_API_KEY "$payload")
+
+    log "$response_payload"
+    echo $response_payload | jq -r '.choices[0].message.content'
+}
+
+# If no arguments left, we're reading from stdin
+if [[ "$#" -eq 0 ]]; then
+    read -r -d '' input
+    process_prompt "$input"
+else
+    # Otherwise we're reading from a file
+    file="$1"
+    prompt=$(cat "$file")
+    response=$(process_prompt "$prompt")
+
+    echo -e "\n\n**GPT Response (model: $model)**\n$response\n\n**User Response**\n" >> "$file"
+fi
